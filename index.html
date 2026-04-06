@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>typotrix</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #000; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  #stage {
+    width: 100vmin;
+    height: 100vmin;
+    max-width: 720px;
+    max-height: 720px;
+    position: relative;
+    cursor: pointer;
+    user-select: none;
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hint {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-family: monospace;
+    font-size: 12px;
+    color: #333;
+    pointer-events: none;
+    text-align: center;
+    line-height: 2;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c"></canvas>
+  <div id="hint">loading fonts...</div>
+</div>
+
+<script>
+const API_KEY = "AIzaSyCltIMLz8FERwlYfYPOPlj0tzM4GneDbhg";
+
+const WORDS = [
+  "TYPE","KERN","GRID","FLUX","BOLD","INK","LEAD",
+  "FONT","FORM","MARK","AXIS","BEAM","CROP","DASH","EDGE",
+  "FACE","GRIT","HEFT","JOIN","KNOT","LIFT","MESH","NODE",
+  "OPEN","PATH","QUAD","RULE","SLAB","THIN","UNIT","VOID",
+  "WAVE","ZERO","APEX","BARE","COAT","EMIT","FINE","GRIP",
+  "IRON","JUST","KEEN","LOOP","MAST","NEON","OVAL","RIFT",
+  "SCAN","TILT","VANE","WARP","ZONE","ARCH","BLOC","CORD",
+  "FOLD","GLOW","HALO","JOLT","KNOB","LACE","MINT","NULL",
+  "PEAK","RING","SLOT","TRIM","VENT","WIRE","ZOOM","PULSE",
+];
+
+const EXCLUDE = new Set([
+  "material symbols outlined","material symbols rounded","material symbols sharp",
+  "material icons","material icons outlined","material icons round",
+  "material icons sharp","material icons two tone","noto emoji","noto color emoji"
+]);
+
+const W = 720, H = 720;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = W; canvas.height = H;
+
+let fonts = [], fontIndex = 0;
+let inverted = false;
+let circle = null;
+let scene = null;
+let cache = {};
+let holdTimer = null, holdX = 0, holdY = 0;
+let holdColour = null, holdCircleStart = 0, holdActive = false;
+let growingCircle = null;
+
+function easeInOut(t) {
+  t = Math.max(0, Math.min(1, t));
+  return t * t * (3 - 2 * t);
+}
+
+async function getColormind() {
+  try {
+    const r = await fetch("https://colormind.io/api/", {
+      method: "POST",
+      body: JSON.stringify({model:"default"})
+    });
+    const d = await r.json();
+    const c = d.result[Math.floor(Math.random()*d.result.length)];
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  } catch {
+    const r = () => 30 + Math.floor(Math.random()*225);
+    return `rgb(${r()},${r()},${r()})`;
+  }
+}
+
+async function loadFonts() {
+  const r = await fetch(`https://www.googleapis.com/webfonts/v1/webfonts?key=${API_KEY}&sort=popularity`);
+  const d = await r.json();
+  const weights = ["900italic","900","800italic","800","700italic","700",
+                   "600italic","600","500italic","500","italic","regular",
+                   "300italic","300","200italic","200","100italic","100"];
+  fonts = [];
+  for (const f of d.items) {
+    if (EXCLUDE.has(f.family.toLowerCase())) continue;
+    for (const w of weights) {
+      if (f.files && f.files[w]) {
+        f._use = w;
+        fonts.push(f);
+        break;
+      }
+    }
+  }
+}
+
+function getCache(fi) {
+  if (!cache[fi]) {
+    const word = WORDS[Math.floor(Math.random()*WORDS.length)];
+    const upper = Math.random() < 0.5;
+    const chars = word.slice(0,4).split('').map(c => upper ? c.toUpperCase() : c.toLowerCase());
+    const digitIdx = Math.floor(Math.random()*4);
+    chars[digitIdx] = String(Math.floor(Math.random()*10));
+    cache[fi] = { chars };
+  }
+  return cache[fi];
+}
+
+class Scene {
+  constructor(letters, fontName, weight, circle) {
+    this.letters = letters;
+    this.fontName = fontName;
+    this.weight = weight;
+    this.circle = circle;
+    this.order = letters.map((_,i)=>i).sort(()=>Math.random()-0.5);
+    this.shown = 0;
+    this.timer = 0;
+    this.interval = 80;
+    this.last = performance.now();
+  }
+
+  update() {
+    const now = performance.now();
+    this.timer += now - this.last;
+    this.last = now;
+    while (this.timer >= this.interval && this.shown < this.order.length) {
+      this.timer -= this.interval;
+      this.shown++;
+    }
+  }
+
+  draw(growing) {
+    const bg = inverted ? '#fff' : '#000';
+    const fg = inverted ? '#000' : '#fff';
+    const labelFg = inverted ? '#888' : '#444';
+
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    if (this.circle) {
+      ctx.beginPath();
+      ctx.arc(this.circle.x, this.circle.y, this.circle.r, 0, Math.PI*2);
+      ctx.fillStyle = this.circle.colour;
+      ctx.fill();
+    }
+
+    if (growing && growing.r > 1) {
+      ctx.beginPath();
+      ctx.arc(growing.x, growing.y, growing.r, 0, Math.PI*2);
+      ctx.fillStyle = growing.colour;
+      ctx.fill();
+    }
+
+    ctx.textBaseline = 'top';
+    for (let i = 0; i < this.shown; i++) {
+      const l = this.letters[this.order[i]];
+      ctx.font = `${l.style} ${l.weight} ${l.size}px "${l.family}"`;
+      ctx.fillStyle = fg;
+      ctx.fillText(l.ch, l.x, l.y);
+    }
+
+    ctx.fillStyle = labelFg;
+    ctx.font = '11px monospace';
+    ctx.textBaseline = 'bottom';
+    const lbl = `${this.fontName} / ${this.weight}`;
+    const lw = ctx.measureText(lbl).width;
+    ctx.fillText(lbl, (W - lw)/2, H - 4);
+  }
+}
+
+async function buildScene(fi) {
+  if (!fonts.length) return null;
+  const font = fonts[fi % fonts.length];
+  const { chars } = getCache(fi);
+
+  const weightNum = font._use.replace('italic','').trim() || '400';
+  const style = font._use.includes('italic') ? 'italic' : 'normal';
+  const url = font.files[font._use];
+
+  try {
+    const ff = new FontFace(font.family, `url(${url})`, {weight: weightNum, style});
+    await ff.load();
+    document.fonts.add(ff);
+  } catch(e) {
+    return null;
+  }
+
+  const cols = 2, rows = 2;
+  const labelH = 27;
+  const cellW = W / cols;
+  const cellH = (H - labelH) / rows;
+
+  const letters = [];
+  for (let ri = 0; ri < rows; ri++) {
+    for (let ci = 0; ci < cols; ci++) {
+      const ch = chars[ri*2+ci];
+      let lo = 10, hi = 900, best = 10;
+      while (lo <= hi) {
+        const mid = (lo+hi)>>1;
+        ctx.font = `${style} ${weightNum} ${mid}px "${font.family}"`;
+        const m = ctx.measureText(ch);
+        const tw = m.width;
+        const th = (m.actualBoundingBoxAscent || mid*0.8) + (m.actualBoundingBoxDescent || mid*0.2);
+        if (tw <= cellW && th <= cellH) { best = mid; lo = mid+1; }
+        else hi = mid-1;
+      }
+      const size = Math.min(Math.floor(best * 1.4), 900);
+      ctx.font = `${style} ${weightNum} ${size}px "${font.family}"`;
+      const m = ctx.measureText(ch);
+      const tw = m.width;
+      const th = (m.actualBoundingBoxAscent||size*0.8) + (m.actualBoundingBoxDescent||size*0.2);
+      const x = ci*cellW + (cellW - tw)/2;
+      const y = ri*cellH + (cellH - th)/2;
+      letters.push({ch, x, y, size, family: font.family, weight: weightNum, style});
+    }
+  }
+
+  return new Scene(letters, font.family, font._use, circle);
+}
+
+function loop() {
+  let growing = null;
+  if (holdActive && holdColour) {
+    const secs = (performance.now() - holdCircleStart) / 1000;
+    const progress = Math.min(secs / 4.0, 1.0);
+    const r = easeInOut(progress) * 600;
+    growing = {x: holdX, y: holdY, r, colour: holdColour};
+    growingCircle = growing;
+    if (progress >= 1.0) {
+      getColormind().then(c => {
+        holdColour = c;
+        holdCircleStart = performance.now();
+        if (scene) scene.circle = null;
+      });
+    }
+  }
+
+  if (scene) {
+    scene.update();
+    scene.draw(growing);
+  }
+  requestAnimationFrame(loop);
+}
+
+async function goTo(fi) {
+  fontIndex = Math.max(0, fi);
+  document.getElementById('hint').textContent = 'loading...';
+  const s = await buildScene(fontIndex);
+  if (s) {
+    scene = s;
+    document.getElementById('hint').style.display = 'none';
+  }
+}
+
+// input handling
+const stage = document.getElementById('stage');
+
+function getPos(e) {
+  const rect = stage.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const src = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * scaleX,
+    y: (src.clientY - rect.top) * scaleY
+  };
+}
+
+function onDown(e) {
+  e.preventDefault();
+  const {x, y} = getPos(e);
+  holdTimer = setTimeout(async () => {
+    holdTimer = null;
+    const nx = x / W, ny = y / H;
+    if (Math.abs(nx - 0.5) < 0.1 && Math.abs(ny - 0.5) < 0.1) {
+      inverted = !inverted;
+      const s = await buildScene(fontIndex);
+      if (s) { s.circle = circle; scene = s; }
+    } else {
+      holdX = x; holdY = y;
+      holdColour = await getColormind();
+      holdCircleStart = performance.now();
+      holdActive = true;
+    }
+  }, 700);
+}
+
+function onUp(e) {
+  e.preventDefault();
+  const {x} = getPos(e);
+  if (holdTimer) {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+    // tap navigation
+    if (x < W/2) goTo(fontIndex + 1);
+    else goTo(Math.max(0, fontIndex - 1));
+  } else if (holdActive) {
+    if (growingCircle && growingCircle.r > 1) {
+      circle = {...growingCircle};
+      if (scene) scene.circle = circle;
+    }
+    holdActive = false;
+    holdColour = null;
+    growingCircle = null;
+  }
+}
+
+stage.addEventListener('mousedown', onDown);
+stage.addEventListener('mouseup', onUp);
+stage.addEventListener('touchstart', onDown, {passive:false});
+stage.addEventListener('touchend', onUp, {passive:false});
+
+// keyboard
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') { circle = null; goTo(fontIndex + 1); }
+  if (e.key === 'ArrowLeft') { circle = null; goTo(Math.max(0, fontIndex - 1)); }
+});
+
+(async () => {
+  loop();
+  await loadFonts();
+  await goTo(0);
+})();
+</script>
+</body>
+</html>
